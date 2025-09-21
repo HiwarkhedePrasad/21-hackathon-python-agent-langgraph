@@ -1,8 +1,6 @@
 """
 Enhanced TalentFlow Pro - Complete CV Processing System with Advanced Ranking
-
-Complete implementation with comprehensive ranking system, tier classification, 
-and detailed candidate evaluation matching the frontend interface.
+(Modified for Supabase/PostgreSQL Integration)
 """
 
 import os
@@ -29,7 +27,7 @@ from langchain_groq import ChatGroq
 # Document processing
 import pdfplumber
 from docx import Document
-import mysql.connector
+import psycopg2  # <-- CHANGED: Using PostgreSQL driver
 
 # Email functionality
 import smtplib
@@ -135,22 +133,16 @@ class JobPostingModel(BaseModel):
 # =================================================================
 
 class DatabaseConfig:
-    """Database configuration management"""
-    def __init__(self, host, port, user, password, database):
-        self.host = host
-        self.port = int(port)
-        self.user = user
-        self.password = password
-        self.database = database
+    """Database configuration management for Supabase/PostgreSQL"""
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        if not self.database_url:
+            raise ValueError("DATABASE_URL not found in environment variables. Please set it for Supabase.")
 
     @classmethod
     def from_env(cls):
         return cls(
-            host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", 3306),
-            user=os.getenv("DB_USER", "root"),
-            password=os.getenv("DB_PASSWORD", "root"),
-            database=os.getenv("DB_NAME", "CIH2")
+            database_url=os.getenv("DATABASE_URL")
         )
 
 class EmailConfig:
@@ -483,8 +475,8 @@ class EnhancedSkillMatcher:
             return "Minimal Match"
 
     def _generate_recruiter_summary(self, candidate_data: Dict, required_matches: List,
-                                    preferred_matches: List, overall_score: float,
-                                    is_qualified: bool) -> str:
+                                     preferred_matches: List, overall_score: float,
+                                     is_qualified: bool) -> str:
         """Generate a summary for recruiters"""
         name = candidate_data.get("name", "Candidate")
         experience = candidate_data.get("total_experience", 0)
@@ -559,49 +551,46 @@ class EnhancedSkillMatcher:
         return {tier: candidates for tier, candidates in tiers.items() if candidates}
 
 # =================================================================
-# DATABASE UTILITIES
+# DATABASE UTILITIES (MODIFIED FOR POSTGRESQL)
 # =================================================================
 
 class DatabaseManager:
-    """Enhanced database operations for bulk processing"""
+    """Enhanced database operations for Supabase/PostgreSQL"""
     
     @staticmethod
     def get_connection():
-        """Get database connection"""
+        """Get database connection using Supabase URL"""
         config = DatabaseConfig.from_env()
-        return mysql.connector.connect(
-            host=config.host,
-            user=config.user,
-            password=config.password,
-            database=config.database,
-            port=config.port
-        )
+        return psycopg2.connect(config.database_url)
     
     @staticmethod
     def create_job_posting(job_data: Dict[str, Any], db_connection) -> int:
         """Create job posting entry"""
         cursor = db_connection.cursor()
         try:
+            # PostgreSQL-compliant CREATE TABLE
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS job_postings (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     job_title VARCHAR(255) NOT NULL,
                     job_description TEXT,
-                    required_skills JSON,
-                    preferred_skills JSON,
+                    required_skills JSONB,
+                    preferred_skills JSONB,
                     min_experience FLOAT DEFAULT 0,
                     department VARCHAR(100),
                     min_match_threshold FLOAT DEFAULT 50.0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
                     status VARCHAR(50) DEFAULT 'active'
                 )
             """)
             
+            # PostgreSQL-compliant INSERT with RETURNING id
             cursor.execute("""
                 INSERT INTO job_postings 
                 (job_title, job_description, required_skills, preferred_skills, 
                  min_experience, department, min_match_threshold)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (
                 job_data['job_title'],
                 job_data['job_description'],
@@ -612,7 +601,7 @@ class DatabaseManager:
                 job_data.get('min_match_threshold', 50.0)
             ))
             
-            job_id = cursor.lastrowid
+            job_id = cursor.fetchone()[0] # Fetch the returned id
             db_connection.commit()
             logger.info(f"Created job posting with ID: {job_id}")
             return job_id
@@ -628,27 +617,30 @@ class DatabaseManager:
         """Create bulk processing batch record"""
         cursor = db_connection.cursor()
         try:
+            # PostgreSQL-compliant CREATE TABLE
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bulk_processing_batches (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     job_id INT,
                     total_resumes INT,
                     processed_resumes INT DEFAULT 0,
                     qualified_candidates INT DEFAULT 0,
                     emails_sent INT DEFAULT 0,
                     processing_status VARCHAR(50) DEFAULT 'started',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    completed_at DATETIME NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ NULL,
                     FOREIGN KEY (job_id) REFERENCES job_postings(id)
                 )
             """)
             
+            # PostgreSQL-compliant INSERT with RETURNING id
             cursor.execute("""
                 INSERT INTO bulk_processing_batches (job_id, total_resumes)
                 VALUES (%s, %s)
+                RETURNING id
             """, (job_id, total_resumes))
             
-            batch_id = cursor.lastrowid
+            batch_id = cursor.fetchone()[0] # Fetch the returned id
             db_connection.commit()
             logger.info(f"Created bulk processing batch with ID: {batch_id}")
             return batch_id
@@ -665,11 +657,12 @@ class DatabaseManager:
         cursor = db_connection.cursor()
         try:
             if status == 'completed':
+                # Use NOW() for PostgreSQL
                 cursor.execute("""
                     UPDATE bulk_processing_batches 
                     SET processed_resumes = %s, qualified_candidates = %s, 
                         emails_sent = %s, processing_status = %s,
-                        completed_at = CURRENT_TIMESTAMP
+                        completed_at = NOW()
                     WHERE id = %s
                 """, (processed, qualified, emails_sent, status, batch_id))
             else:
@@ -697,10 +690,10 @@ class DatabaseManager:
             # Clean and prepare data
             name = data.get("name", "").replace("  ", " ").strip() if data.get("name") else None
             
-            # Create candidates table
+            # PostgreSQL-compliant CREATE TABLE for candidates
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS candidates (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     name VARCHAR(255),
                     role VARCHAR(255),
                     summary TEXT,
@@ -715,19 +708,20 @@ class DatabaseManager:
                     work_gap BOOLEAN DEFAULT FALSE,
                     job_id INT,
                     batch_id INT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
                     last_updated DATE,
                     FOREIGN KEY (job_id) REFERENCES job_postings(id) ON DELETE SET NULL,
                     FOREIGN KEY (batch_id) REFERENCES bulk_processing_batches(id) ON DELETE SET NULL
                 )
             """)
             
-            # Insert candidate basic info with job association
+            # PostgreSQL-compliant INSERT with RETURNING id, use CURRENT_DATE
             candidate_query = """
                 INSERT INTO candidates (name, role, summary, email, phone, location,
                                         portfolio_url, github_url, linkedin_url, total_experience,
                                         education_gap, work_gap, last_updated, job_id, batch_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURDATE(), %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, %s, %s)
+                RETURNING id
             """
             
             candidate_data = (
@@ -748,7 +742,7 @@ class DatabaseManager:
             )
             
             cursor.execute(candidate_query, candidate_data)
-            candidate_id = cursor.lastrowid
+            candidate_id = cursor.fetchone()[0] # Fetch the returned id
             
             # Insert related data
             DatabaseManager._insert_experience(cursor, candidate_id, data.get("experience", []))
@@ -774,7 +768,7 @@ class DatabaseManager:
         """Insert experience data"""
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS experience (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 candidate_id INT,
                 title VARCHAR(255),
                 company VARCHAR(255),
@@ -809,7 +803,7 @@ class DatabaseManager:
         """Insert education data"""
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS education (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 candidate_id INT,
                 institute VARCHAR(255),
                 degree VARCHAR(255),
@@ -842,7 +836,7 @@ class DatabaseManager:
         """Insert skills data"""
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS skills (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 candidate_id INT,
                 skill VARCHAR(255),
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id)
@@ -863,7 +857,7 @@ class DatabaseManager:
         """Insert projects data"""
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS projects (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 candidate_id INT,
                 title VARCHAR(255),
                 description TEXT,
@@ -888,7 +882,7 @@ class DatabaseManager:
         """Insert soft skills data"""
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS soft_skills (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 candidate_id INT,
                 skill VARCHAR(255),
                 strength_level VARCHAR(50),
@@ -915,7 +909,7 @@ class DatabaseManager:
         if scoring and any(scoring.values()):
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scoring_metrics (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     candidate_id INT,
                     tech_score FLOAT,
                     communication_score FLOAT,
@@ -997,16 +991,16 @@ class DatabaseManager:
         try:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS assessment (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     assessment_uuid VARCHAR(255) UNIQUE NOT NULL,
                     candidate_id VARCHAR(255) NOT NULL,
                     candidate_email VARCHAR(255) NOT NULL,
                     job_title VARCHAR(255) NOT NULL,
                     status VARCHAR(50) DEFAULT 'created',
                     screening_email_sent BOOLEAN DEFAULT FALSE,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    start_time DATETIME NULL,
-                    end_time DATETIME NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    start_time TIMESTAMPTZ NULL,
+                    end_time TIMESTAMPTZ NULL,
                     score DECIMAL(5,2) NULL
                 )
             """)
@@ -1380,7 +1374,7 @@ class EnhancedBulkCVWorkflowNodes:
         return [{'skill': skill, 'count': count} for skill, count in skill_counts.most_common(10)]
     
     def _generate_recruiter_recommendations(self, qualified_candidates: List[Dict], 
-                                            candidate_tiers: Dict, uncovered_skills: List) -> List[str]:
+                                             candidate_tiers: Dict, uncovered_skills: List) -> List[str]:
         """Generate actionable recommendations for recruiters"""
         recommendations = []
         
@@ -1962,6 +1956,7 @@ async def root():
         "version": "4.0.0",
         "agent_type": "enhanced_langgraph_bulk_workflow_groq_with_ranking",
         "ai_provider": "Groq",
+        "database_type": "PostgreSQL (Supabase)",
         "features": [
             "Bulk document parsing (PDF/DOCX/ZIP)",
             "AI-powered data extraction with Groq (ultra-fast inference)",
